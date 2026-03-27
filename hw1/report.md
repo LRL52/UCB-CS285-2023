@@ -220,6 +220,17 @@ class MLPPolicySL(BasePolicy, nn.Module):
 - `logstd`: 对数标准差 $\log \sigma$，与状态无关（state-independent）
 - 使用 `itertools.chain` 将两部分参数合并优化
 
+在策略网络的初始化阶段，优化器的构建采用了一个关键设计：
+
+```python
+self.optimizer = optim.Adam(
+    itertools.chain([self.logstd], self.mean_net.parameters()),
+    self.learning_rate
+)
+```
+
+这里 `itertools.chain` 将两组参数合并为一个统一的迭代器。第一组是 `self.logstd`，这是一个形状为 `[ac_dim]` 的独立参数向量，表示每个动作维度的对数标准差；第二组是 `self.mean_net.parameters()`，包含神经网络中所有层的权重矩阵和偏置向量。通过这种方式，Adam 优化器能够同时更新均值网络参数 $\theta$ 和标准差参数 $\log\sigma$，使得模型在学习如何预测动作的同时，也能自适应地调整策略的随机性程度。
+
 #### 1.3 需要实现的方法
 
 **`forward()` 方法** (TODO):
@@ -269,134 +280,6 @@ def update(self, observations, actions):
     # 3. 计算负对数似然损失（NLL Loss）
     # 4. 反向传播并更新参数
 ```
-
-**实现思路与损失函数详解**:
-
-#### 参数优化机制
-
-在策略网络的初始化阶段，优化器的构建采用了一个关键设计：
-
-```python
-self.optimizer = optim.Adam(
-    itertools.chain([self.logstd], self.mean_net.parameters()),
-    self.learning_rate
-)
-```
-
-这里 `itertools.chain` 将两组参数合并为一个统一的迭代器。第一组是 `self.logstd`，这是一个形状为 `[ac_dim]` 的独立参数向量，表示每个动作维度的对数标准差；第二组是 `self.mean_net.parameters()`，包含神经网络中所有层的权重矩阵和偏置向量。通过这种方式，Adam 优化器能够同时更新均值网络参数 $\theta$ 和标准差参数 $\log\sigma$，使得模型在学习如何预测动作的同时，也能自适应地调整策略的随机性程度。
-
-#### 高斯策略的损失函数推导
-
-本框架采用高斯策略进行连续动作空间的建模。给定观测 $s$，策略输出服从高斯分布的动作：
-
-$$
-\pi_\theta(a|s) = \mathcal{N}(a|\mu_\theta(s), \sigma^2)
-$$
-
-其中 $\mu_\theta(s)$ 是由神经网络 `mean_net` 输出的均值，$\sigma = \exp(\text{logstd})$ 是标准差。在监督学习框架下，我们希望最大化专家动作 $a^*$ 在当前策略下的对数似然，即最小化负对数似然损失：
-
-$$
-\mathcal{L} = -\log \pi_\theta(a^*|s)
-$$
-
-为了展开这个损失函数，我们从多元高斯分布的概率密度函数出发。对于 $d$ 维动作空间，假设各维度独立且具有相同的标准差（对角协方差矩阵），概率密度函数为：
-
-$$
-\pi_\theta(a|s) = \prod_{i=1}^{d} \frac{1}{\sqrt{2\pi\sigma^2}} \exp\left(-\frac{(a_i - \mu_{\theta,i}(s))^2}{2\sigma^2}\right)
-$$
-
-取对数得到对数似然：
-
-$$
-\log \pi_\theta(a|s) = \sum_{i=1}^{d} \left[-\frac{1}{2}\log(2\pi) - \log\sigma - \frac{(a_i - \mu_{\theta,i}(s))^2}{2\sigma^2}\right]
-$$
-
-整理后可以写成向量形式：
-
-$$
-\log \pi_\theta(a|s) = -\frac{d}{2}\log(2\pi) - d\log\sigma - \frac{1}{2\sigma^2}\|a - \mu_\theta(s)\|^2
-$$
-
-因此，负对数似然损失为：
-
-$$
-\mathcal{L} = -\log \pi_\theta(a^*|s) = \frac{1}{2\sigma^2}\|a^* - \mu_\theta(s)\|^2 + d\log\sigma + \frac{d}{2}\log(2\pi)
-$$
-
-由于最后一项 $\frac{d}{2}\log(2\pi)$ 是常数，在优化过程中可以忽略，最终的损失函数简化为：
-
-$$
-\mathcal{L} = \frac{1}{2\sigma^2}\|a^* - \mu_\theta(s)\|^2 + d\log\sigma
-$$
-
-#### logstd 参数的双重作用
-
-从上述损失函数可以看出，`logstd` 参数（即 $\log\sigma$）通过两个项影响优化过程，这两项之间存在微妙的平衡关系。
-
-第一项 $\frac{1}{2\sigma^2}\|a^* - \mu_\theta(s)\|^2$ 是预测误差的加权平方和，其中权重为 $\frac{1}{2\sigma^2} = \frac{1}{2}\exp(-2\text{logstd})$。当 `logstd` 较小时，$\sigma$ 较小，这个权重系数变大，意味着模型对预测误差更加敏感，必须更精确地拟合专家动作才能降低损失。反之，当 `logstd` 较大时，$\sigma$ 较大，权重系数变小，模型对误差的容忍度提高，允许预测值与专家动作之间存在较大偏差。这种机制使得标准差参数能够调节策略的确定性程度。
-
-第二项 $d\log\sigma = d \cdot \text{logstd}$ 是一个正则化项，它直接惩罚过大的标准差。如果没有这一项，模型可以通过无限增大 $\sigma$ 来使第一项趋近于零，从而"欺骗"优化器。这个正则化项确保了标准差不会无限增长，迫使模型在降低预测误差和保持合理探索能力之间找到平衡点。在实际训练中，这两项的相互作用使得 `logstd` 能够自适应地调整：当模型预测能力较弱时，较大的标准差可以降低总损失；当模型预测能力提升后，标准差会逐渐减小以提高策略的确定性。
-
-#### PyTorch 实现
-
-在 PyTorch 中实现上述损失函数时，推荐使用 `torch.distributions` 模块，它能够自动处理高斯分布的对数概率计算。具体实现流程如下：
-
-```python
-def update(self, observations, actions):
-    # 将 numpy 数组转换为 PyTorch 张量
-    observations = ptu.from_numpy(observations)  # [batch_size, ob_dim]
-    actions = ptu.from_numpy(actions)            # [batch_size, ac_dim]
-
-    # 前向传播：计算动作分布的参数
-    mean = self.mean_net(observations)           # 均值 μ_θ(s)
-    std = torch.exp(self.logstd)                 # 标准差 σ = exp(logstd)
-
-    # 构建高斯分布对象
-    dist = torch.distributions.Normal(mean, std)
-
-    # 计算负对数似然损失
-    log_prob = dist.log_prob(actions)            # [batch_size, ac_dim]
-    loss = -log_prob.mean()                      # 对所有样本和维度求平均
-
-    # 反向传播和参数更新
-    self.optimizer.zero_grad()
-    loss.backward()
-    self.optimizer.step()
-
-    return {'Training Loss': ptu.to_numpy(loss)}
-```
-
-这里 `dist.log_prob(actions)` 内部实现了前面推导的对数似然公式，返回的是每个样本每个动作维度的对数概率。对其取负并求平均，即得到 batch 的平均负对数似然损失。
-
-#### 梯度更新机制
-
-在调用 `loss.backward()` 时，PyTorch 的自动微分机制会计算损失函数对所有参数的梯度，包括 `mean_net` 的参数和 `logstd`。对于 `logstd` 参数，其梯度可以通过链式法则推导得出。
-
-从损失函数 $\mathcal{L} = \frac{1}{2\sigma^2}\|a^* - \mu_\theta(s)\|^2 + d\log\sigma$ 出发，注意到 $\sigma = \exp(\text{logstd})$，因此 $\log\sigma = \text{logstd}$。对 `logstd` 求偏导：
-
-$$
-\frac{\partial \mathcal{L}}{\partial \text{logstd}} = \frac{\partial}{\partial \text{logstd}}\left[\frac{1}{2\sigma^2}\|a^* - \mu\|^2 + d\cdot\text{logstd}\right]
-$$
-
-对于第一项，利用链式法则：
-
-$$
-\frac{\partial}{\partial \text{logstd}}\left[\frac{1}{2\sigma^2}\|a^* - \mu\|^2\right] = \|a^* - \mu\|^2 \cdot \frac{\partial}{\partial \text{logstd}}\left[\frac{1}{2\sigma^2}\right]
-$$
-
-由于 $\sigma = \exp(\text{logstd})$，有 $\frac{\partial \sigma}{\partial \text{logstd}} = \sigma$，进而：
-
-$$
-\frac{\partial}{\partial \text{logstd}}\left[\frac{1}{2\sigma^2}\right] = -\frac{1}{\sigma^3} \cdot \sigma = -\frac{1}{\sigma^2}
-$$
-
-因此第一项的梯度为 $-\frac{1}{\sigma^2}\|a^* - \mu\|^2$。第二项的梯度显然为 $d$。综合起来：
-
-$$
-\frac{\partial \mathcal{L}}{\partial \text{logstd}} = -\frac{1}{\sigma^2}\|a^* - \mu\|^2 + d
-$$
-
-这个梯度公式揭示了 `logstd` 的自适应调整机制。当预测误差 $\|a^* - \mu\|^2$ 较大时，第一项的绝对值大于 $d$，梯度为负，`logstd` 会减小，从而降低 $\sigma$，迫使模型提高拟合精度。当预测误差较小时，第一项的绝对值小于 $d$，梯度为正，`logstd` 会增大，从而增加 $\sigma$，允许更大的探索空间。通过这种机制，模型能够在训练过程中动态平衡确定性和随机性，既保证对专家动作的准确模仿，又维持适度的探索能力。
 
 ---
 
@@ -855,5 +738,224 @@ def to_numpy(tensor):
 ---
 
 ## 作业思路与实现
+
+### Behavioral Cloning 实现
+
+Behavioral Cloning (BC) 是一种监督学习方法，通过模仿专家的行为来学习策略。本次实现需要完成三个文件中的 TODO 部分。
+
+#### 实现 1: 轨迹采样 (`utils.py`)
+
+**文件**: `cs285/infrastructure/utils.py`
+
+**任务**: 实现 `sample_trajectory` 函数，用于在环境中采样一条完整的轨迹。
+
+**实现代码**:
+
+```python
+def sample_trajectory(env, policy, max_path_length, render=False):
+    """Sample a rollout in the environment from a policy."""
+
+    # 重置环境，获取初始观测
+    ob = env.reset()
+
+    # 初始化存储列表
+    obs, acs, rewards, next_obs, terminals, image_obs = [], [], [], [], [], []
+    steps = 0
+
+    while True:
+        # 渲染图像（如果需要）
+        if render:
+            if hasattr(env, 'sim'):
+                img = env.sim.render(camera_name='track', height=500, width=500)[::-1]
+            else:
+                img = env.render(mode='single_rgb_array')
+            image_obs.append(cv2.resize(img, dsize=(250, 250), interpolation=cv2.INTER_CUBIC))
+
+        # 使用策略选择动作
+        ac = policy.get_action(ob)
+        ac = ac[0]
+
+        # 在环境中执行动作
+        next_ob, rew, done, _ = env.step(ac)
+
+        # 判断轨迹是否结束
+        steps += 1
+        rollout_done = done or (steps >= max_path_length)
+
+        # 记录转移
+        obs.append(ob)
+        acs.append(ac)
+        rewards.append(rew)
+        next_obs.append(next_ob)
+        terminals.append(rollout_done)
+
+        ob = next_ob
+
+        if rollout_done:
+            break
+
+    return {"observation": np.array(obs, dtype=np.float32),
+            "image_obs": np.array(image_obs, dtype=np.uint8),
+            "reward": np.array(rewards, dtype=np.float32),
+            "action": np.array(acs, dtype=np.float32),
+            "next_observation": np.array(next_obs, dtype=np.float32),
+            "terminal": np.array(terminals, dtype=np.float32)}
+```
+
+**实现要点**:
+- 使用 `policy.get_action(ob)` 获取动作，注意需要提取第一个元素 `ac[0]`
+- 终止条件为 `done or (steps >= max_path_length)`，即环境终止或达到最大步数
+- 返回包含完整轨迹信息的字典
+
+#### 实现 2: 策略网络 (`MLP_policy.py`)
+
+**文件**: `cs285/policies/MLP_policy.py`
+
+**任务**: 实现 `forward` 和 `update` 方法，构建高斯策略并进行监督学习。
+
+##### 2.1 `forward()` 方法
+
+**实现代码**:
+
+```python
+def forward(self, observation: torch.FloatTensor) -> Any:
+    """前向传播：根据观测输出动作"""
+
+    # 计算动作均值
+    mean = self.mean_net(observation)
+    # 计算标准差
+    std = torch.exp(self.logstd)
+    # 构建高斯分布
+    dist = distributions.Normal(mean, std)
+    # 采样动作
+    action = dist.sample()
+    return action
+```
+
+**实现要点**:
+- 通过 `mean_net` 计算均值 $\mu_\theta(s)$
+- 通过 `torch.exp(self.logstd)` 计算标准差 $\sigma = \exp(\log\sigma)$
+- 使用 `torch.distributions.Normal` 构建高斯分布
+- 从分布中采样动作
+
+##### 2.2 `update()` 方法与损失函数
+
+**高斯策略的损失函数推导**
+
+本框架采用高斯策略进行连续动作空间的建模。给定观测 $s$，策略输出服从高斯分布的动作：
+
+$$
+\pi_\theta(a|s) = \mathcal{N}(a|\mu_\theta(s), \sigma^2)
+$$
+
+其中 $\mu_\theta(s)$ 是由神经网络 `mean_net` 输出的均值，$\sigma = \exp(\text{logstd})$ 是标准差。在监督学习框架下，我们希望最大化专家动作 $a^*$ 在当前策略下的对数似然，即最小化负对数似然损失：
+
+$$
+\mathcal{L} = -\log \pi_\theta(a^*|s)
+$$
+
+为了展开这个损失函数，我们从多元高斯分布的概率密度函数出发。对于 $d$ 维动作空间，假设各维度独立且具有相同的标准差（对角协方差矩阵），概率密度函数为：
+
+$$
+\pi_\theta(a|s) = \prod_{i=1}^{d} \frac{1}{\sqrt{2\pi\sigma^2}} \exp\left(-\frac{(a_i - \mu_{\theta,i}(s))^2}{2\sigma^2}\right)
+$$
+
+取对数得到对数似然：
+
+$$
+\log \pi_\theta(a|s) = \sum_{i=1}^{d} \left[-\frac{1}{2}\log(2\pi) - \log\sigma - \frac{(a_i - \mu_{\theta,i}(s))^2}{2\sigma^2}\right]
+$$
+
+整理后可以写成向量形式：
+
+$$
+\log \pi_\theta(a|s) = -\frac{d}{2}\log(2\pi) - d\log\sigma - \frac{1}{2\sigma^2}\|a - \mu_\theta(s)\|^2
+$$
+
+因此，负对数似然损失为：
+
+$$
+\mathcal{L} = -\log \pi_\theta(a^*|s) = \frac{1}{2\sigma^2}\|a^* - \mu_\theta(s)\|^2 + d\log\sigma + \frac{d}{2}\log(2\pi)
+$$
+
+由于最后一项 $\frac{d}{2}\log(2\pi)$ 是常数，在优化过程中可以忽略，最终的损失函数简化为：
+
+$$
+\mathcal{L} = \frac{1}{2\sigma^2}\|a^* - \mu_\theta(s)\|^2 + d\log\sigma
+$$
+
+**logstd 参数的双重作用**
+
+从上述损失函数可以看出，`logstd` 参数（即 $\log\sigma$）通过两个项影响优化过程，这两项之间存在微妙的平衡关系。
+
+第一项 $\frac{1}{2\sigma^2}\|a^* - \mu_\theta(s)\|^2$ 是预测误差的加权平方和，其中权重为 $\frac{1}{2\sigma^2} = \frac{1}{2}\exp(-2\text{logstd})$。当 `logstd` 较小时，$\sigma$ 较小，这个权重系数变大，意味着模型对预测误差更加敏感，必须更精确地拟合专家动作才能降低损失。反之，当 `logstd` 较大时，$\sigma$ 较大，权重系数变小，模型对误差的容忍度提高，允许预测值与专家动作之间存在较大偏差。这种机制使得标准差参数能够调节策略的确定性程度。
+
+第二项 $d\log\sigma = d \cdot \text{logstd}$ 是一个正则化项，它直接惩罚过大的标准差。如果没有这一项，模型可以通过无限增大 $\sigma$ 来使第一项趋近于零，从而"欺骗"优化器。这个正则化项确保了标准差不会无限增长，迫使模型在降低预测误差和保持合理探索能力之间找到平衡点。在实际训练中，这两项的相互作用使得 `logstd` 能够自适应地调整：当模型预测能力较弱时，较大的标准差可以降低总损失；当模型预测能力提升后，标准差会逐渐减小以提高策略的确定性。
+
+**实现代码**:
+
+```python
+def update(self, observations, actions):
+    """监督学习更新策略"""
+
+    # 转换为 PyTorch 张量
+    observations = ptu.from_numpy(observations)
+    actions = ptu.from_numpy(actions)
+
+    # 前向传播：计算动作分布
+    mean = self.mean_net(observations)
+    std = torch.exp(self.logstd)
+    dist = distributions.Normal(mean, std)
+
+    # 计算负对数似然损失
+    log_prob = dist.log_prob(actions)
+    loss = -log_prob.mean()
+
+    # 反向传播和参数更新
+    self.optimizer.zero_grad()
+    loss.backward()
+    self.optimizer.step()
+
+    return {'Training Loss': ptu.to_numpy(loss)}
+```
+
+#### 实现 3: 训练循环 (`run_hw1.py`)
+
+**文件**: `cs285/scripts/run_hw1.py`
+
+**任务**: 实现从 replay buffer 中采样 mini-batch 的逻辑。
+
+**实现代码**:
+
+```python
+# 训练循环中的采样部分
+for _ in range(params['num_agent_train_steps_per_iter']):
+    # 从 replay buffer 中随机采样 mini-batch
+    indices = np.random.permutation(len(replay_buffer.obs))[:params['train_batch_size']]
+    ob_batch = replay_buffer.obs[indices]
+    ac_batch = replay_buffer.acs[indices]
+
+    # 使用采样的数据训练策略
+    train_log = actor.update(ob_batch, ac_batch)
+    training_logs.append(train_log)
+```
+
+**实现要点**:
+- 使用 `np.random.permutation` 生成随机索引，确保采样的随机性
+- 从 `replay_buffer.obs` 和 `replay_buffer.acs` 中提取对应的观测和动作
+- 采样大小为 `params['train_batch_size']`（默认 100）
+- 每轮迭代执行 `num_agent_train_steps_per_iter` 次梯度更新（默认 1000）
+
+#### BC 算法流程总结
+
+1. **数据加载**: 从 `expert_data` 文件加载专家轨迹（第 0 轮）
+2. **数据存储**: 将轨迹添加到 replay buffer
+3. **训练循环**:
+   - 随机采样 mini-batch
+   - 计算负对数似然损失
+   - 反向传播更新策略参数
+4. **评估**: 使用学习的策略在环境中采样，计算平均回报
+
+---
 
 ## 实验结果与分析
