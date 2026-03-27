@@ -116,6 +116,21 @@ class MLPPolicySL(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
         """
         torch.save(self.state_dict(), filepath)
 
+    def get_action(self, obs: np.ndarray) -> np.ndarray:
+        """
+        Query the policy for an action given an observation
+
+        :param obs: observation(s) to query the policy
+        :return: action(s) from the policy
+        """
+        if len(obs.shape) == 1:
+            obs = obs[None]  # Add batch dimension if needed
+
+        obs = ptu.from_numpy(obs)
+        action = self(obs)
+        action = ptu.to_numpy(action)
+        return action
+
     def forward(self, observation: torch.FloatTensor) -> Any:
         """
         Defines the forward pass of the network
@@ -124,12 +139,15 @@ class MLPPolicySL(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
         :return:
             action: sampled action(s) from the policy
         """
-        # TODO: implement the forward pass of the network.
-        # You can return anything you want, but you should be able to differentiate
-        # through it. For example, you can return a torch.FloatTensor. You can also
-        # return more flexible objects, such as a
-        # `torch.distributions.Distribution` object. It's up to you!
-        raise NotImplementedError
+        # 计算动作均值
+        mean = self.mean_net(observation)
+        # 计算标准差
+        std = torch.exp(self.logstd)
+        # 构建高斯分布
+        dist = distributions.Normal(mean, std)
+        # 采样动作
+        action = dist.sample()
+        return action
 
     def update(self, observations, actions):
         """
@@ -140,8 +158,24 @@ class MLPPolicySL(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
         :return:
             dict: 'Training Loss': supervised learning loss
         """
-        # TODO: update the policy and return the loss
-        loss = TODO
+        # 转换为 PyTorch 张量
+        observations = ptu.from_numpy(observations)
+        actions = ptu.from_numpy(actions)
+
+        # 前向传播：计算动作分布
+        mean = self.mean_net(observations)
+        std = torch.exp(self.logstd)
+        dist = distributions.Normal(mean, std)
+
+        # 计算负对数似然损失
+        log_prob = dist.log_prob(actions)
+        loss = -log_prob.mean()
+
+        # 反向传播和参数更新
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
         return {
             # You can add extra logging information here, but keep this line
             'Training Loss': ptu.to_numpy(loss),
