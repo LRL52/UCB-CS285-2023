@@ -1,3 +1,7 @@
+由于 [CS285 2023 Fall](https://rail.eecs.berkeley.edu/deeprlcourse-fa23/) 版本有 video recordings，因此选择该版本尝试完成作业。[本人仓库传送门](https://github.com/LRL52/UCB-CS285-2023)。
+
+希望这学期能够有时间尽可能学一点 DRL 吧，目前上课又不太能跟得上了🤡，亟需动手实践下代码。以下内容大部分为 AIGC，代码实现也为 AIGC（博主实在太菜了，对 python/RL 相关库完全不会，只能靠 vibe coding 了），已经过个人校对和修补，希望没有大锅。
+
 ## 证明题解答
 
 **1.1 证明 $\sum_{s_t}|p_{\pi_\theta}(s_t) - p_{\pi^*}(s_t)| \leq 2T\varepsilon$**
