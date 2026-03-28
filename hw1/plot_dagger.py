@@ -92,7 +92,7 @@ def main():
     ax.legend(fontsize=11)
 
     fig.tight_layout()
-    output_path = args.output or f"figures/dagger_{args.env}.pdf"
+    output_path = args.output or f"figures/dagger_{args.env}.png"
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=200)
